@@ -332,14 +332,23 @@ def add_sector_hierarchy(child: str, parent: str):
 
 # ── 조회 ─────────────────────────────────────────────────────────────────────
 
-def get_unextracted_articles(limit: int = 50) -> List[Dict]:
+def get_unextracted_articles(limit: int = 50, keyword: str = None) -> List[Dict]:
     conn = get_conn()
-    rows = conn.execute(
-        """SELECT id, keyword, title, body, url FROM news_articles
-           WHERE graph_extracted = 0 AND body IS NOT NULL AND body != ''
-           ORDER BY fetched_at DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
+    if keyword:
+        rows = conn.execute(
+            """SELECT id, keyword, title, body, url FROM news_articles
+               WHERE graph_extracted = 0 AND body IS NOT NULL AND body != ''
+               AND keyword = ?
+               ORDER BY fetched_at DESC LIMIT ?""",
+            (keyword, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, keyword, title, body, url FROM news_articles
+               WHERE graph_extracted = 0 AND body IS NOT NULL AND body != ''
+               ORDER BY fetched_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

@@ -89,9 +89,9 @@ EXTRACTION_PROMPT = """
 """
 
 
-def extract_graph_from_article(title: str, body: str) -> Dict[str, Any]:
-    """단일 기사에서 노드·엣지 추출 (OpenAI 호출)"""
-    text = f"{title}\n{body}"
+def _extract_single(article: dict) -> dict:
+    """단일 기사 LLM 추출 (병렬 호출용)"""
+    text = f"{article['title']}\n{(article.get('body') or '')}"
     try:
         response = _get_client().chat.completions.create(
             model=os.environ.get("MODEL_NAME", "gpt-4o-mini"),
@@ -102,8 +102,7 @@ def extract_graph_from_article(title: str, body: str) -> Dict[str, Any]:
             temperature=0,
             response_format={"type": "json_object"},
         )
-        result = json.loads(response.choices[0].message.content)
-        return result
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
         print(f"[LLM 오류] {e}")
         return {"nodes": [], "edges": []}
@@ -195,59 +194,73 @@ def build_rag_context(graph_data: dict, query: str = "") -> str:
     return "\n".join(lines)
 
 
-def build_graph_from_new_articles(progress_callback=None) -> Dict[str, int]:
-    """
-    미처리 뉴스 기사를 읽어 그래프를 점진적으로 확장합니다.
+PARALLEL_WORKERS = 5   # 동시 LLM 호출 수
+ARTICLES_PER_UPDATE = 25  # 검색 1회당 최대 처리 기사 수
 
-    Args:
-        progress_callback: (current, total, title) → None (Streamlit progress bar용)
+
+def build_graph_from_new_articles(progress_callback=None, keyword: str = None) -> Dict[str, int]:
+    """
+    미처리 뉴스 기사를 병렬 LLM 호출로 처리합니다.
+    PARALLEL_WORKERS개 기사를 동시에 호출하여 대기 시간을 겹칩니다.
 
     Returns:
         {"processed": int, "new_nodes": int, "new_edges": int}
     """
-    articles = get_unextracted_articles(limit=50)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    articles = get_unextracted_articles(limit=ARTICLES_PER_UPDATE, keyword=keyword)
     if not articles:
         return {"processed": 0, "new_nodes": 0, "new_edges": 0}
 
-    processed_ids = []
     total_nodes = 0
     total_edges = 0
+    processed_ids = []
 
-    for i, article in enumerate(articles):
-        if progress_callback:
-            progress_callback(i, len(articles), article["title"])
+    if progress_callback:
+        progress_callback(0, len(articles), articles[0]["title"])
 
-        result = extract_graph_from_article(article["title"], article.get("body", ""))
+    # 병렬 LLM 호출
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        future_to_article = {
+            executor.submit(_extract_single, article): article
+            for article in articles
+        }
 
-        for node in result.get("nodes", []):
-            if node.get("id") and node.get("type"):
-                upsert_node(
-                    node["id"],
-                    node.get("label", node["id"]),
-                    node["type"],
-                    subtype=node.get("subtype"),
-                )
-                # 섹터 계층 자동 등록
-                if node["type"] == "Sector" and node.get("subtype") == "Sub":
-                    add_sector_hierarchy(node["id"], node.get("parent_sector", "전체"))
-                total_nodes += 1
+        for future in as_completed(future_to_article):
+            article = future_to_article[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                print(f"[병렬 오류] {e}")
+                result = {"nodes": [], "edges": []}
 
-        for edge in result.get("edges", []):
-            if edge.get("source") and edge.get("target") and edge.get("relation"):
-                edge_id = upsert_edge(
-                    edge["source"],
-                    edge["target"],
-                    edge["relation"],
-                    sentiment=edge.get("sentiment", "neutral"),
-                    confidence=float(edge.get("confidence", 1.0)),
-                    temporal_scope=edge.get("temporal_scope"),
-                )
-                # 근거 문장 저장
-                if edge_id and edge.get("excerpt"):
-                    add_edge_evidence(edge_id, article["id"], edge["excerpt"])
-                total_edges += 1
+            for node in result.get("nodes", []):
+                if node.get("id") and node.get("type"):
+                    upsert_node(
+                        node["id"],
+                        node.get("label", node["id"]),
+                        node["type"],
+                        subtype=node.get("subtype"),
+                    )
+                    if node["type"] == "Sector" and node.get("subtype") == "Sub":
+                        add_sector_hierarchy(node["id"], node.get("parent_sector", "전체"))
+                    total_nodes += 1
 
-        processed_ids.append(article["id"])
+            for edge in result.get("edges", []):
+                if edge.get("source") and edge.get("target") and edge.get("relation"):
+                    edge_id = upsert_edge(
+                        edge["source"],
+                        edge["target"],
+                        edge["relation"],
+                        sentiment=edge.get("sentiment", "neutral"),
+                        confidence=float(edge.get("confidence", 1.0)),
+                        temporal_scope=edge.get("temporal_scope"),
+                    )
+                    if edge_id and edge.get("excerpt"):
+                        add_edge_evidence(edge_id, article["id"], edge["excerpt"])
+                    total_edges += 1
+
+            processed_ids.append(article["id"])
 
     mark_articles_extracted(processed_ids)
 
@@ -628,3 +641,127 @@ def render_full_graph_with_highlight(keyword: str | None = None, height: int = 7
     """
     html = html.replace("<body>", f"<body>{legend_html}")
     return html, neighborhood
+
+
+def get_indirect_sector_influences(keyword: str, max_results: int = 3) -> Dict[str, list]:
+    """
+    키워드의 2-hop 간접 섹터 영향을 반환합니다.
+    직접 연결된 노드를 거쳐 연결된 Sector 노드만 대상으로 합니다.
+
+    Returns:
+        {
+            "inbound":  [{"sector_label", "mid_label", "mid_relation", "sentiment", "path"}, ...],
+            "outbound": [...]
+        }
+    """
+    from db import get_conn
+    conn = get_conn()
+
+    # 1. 키워드 매칭 노드
+    center_rows = conn.execute(
+        "SELECT id FROM graph_nodes WHERE id LIKE ? OR label LIKE ?",
+        (f"%{keyword}%", f"%{keyword}%"),
+    ).fetchall()
+    center_ids = {r["id"] for r in center_rows}
+
+    if not center_ids:
+        conn.close()
+        return {"inbound": [], "outbound": []}
+
+    ph = ",".join("?" * len(center_ids))
+
+    # 2. 1-hop 직접 연결 엣지
+    direct_edges = conn.execute(
+        f"SELECT source, target, relation, sentiment FROM graph_edges "
+        f"WHERE source IN ({ph}) OR target IN ({ph})",
+        list(center_ids) + list(center_ids),
+    ).fetchall()
+
+    # 직접 이웃 분류: outbound_neighbors(키워드→), inbound_neighbors(→키워드)
+    outbound_neighbors = {}  # neighbor_id -> edge
+    inbound_neighbors  = {}
+    for e in direct_edges:
+        e = dict(e)
+        if e["source"] in center_ids and e["target"] not in center_ids:
+            outbound_neighbors[e["target"]] = e
+        elif e["target"] in center_ids and e["source"] not in center_ids:
+            inbound_neighbors[e["source"]] = e
+
+    all_direct_ids = center_ids | set(outbound_neighbors) | set(inbound_neighbors)
+
+    def _fetch_indirect(neighbor_ids: dict, direction: str) -> list:
+        """neighbor_ids(dict: id->direct_edge)에서 2-hop Sector 노드를 탐색"""
+        if not neighbor_ids:
+            return []
+
+        ph2 = ",".join("?" * len(neighbor_ids))
+        ph3 = ",".join("?" * len(all_direct_ids))
+
+        if direction == "outbound":
+            # 이웃이 영향을 주는 Sector (이웃 → Sector)
+            rows = conn.execute(
+                f"""SELECT ge.source, ge.target, ge.relation, ge.sentiment,
+                           gn_t.label AS tgt_label, gn_t.type AS tgt_type,
+                           gn_s.label AS src_label, gn_t.mention_count
+                    FROM graph_edges ge
+                    JOIN graph_nodes gn_t ON ge.target = gn_t.id
+                    JOIN graph_nodes gn_s ON ge.source = gn_s.id
+                    WHERE ge.source IN ({ph2})
+                      AND ge.target NOT IN ({ph3})
+                      AND gn_t.type = 'Sector'
+                    ORDER BY gn_t.mention_count DESC""",
+                list(neighbor_ids.keys()) + list(all_direct_ids),
+            ).fetchall()
+        else:
+            # Sector가 이웃에 영향을 주는 것 (Sector → 이웃)
+            rows = conn.execute(
+                f"""SELECT ge.source, ge.target, ge.relation, ge.sentiment,
+                           gn_s.label AS src_label, gn_s.type AS src_type,
+                           gn_t.label AS tgt_label, gn_s.mention_count
+                    FROM graph_edges ge
+                    JOIN graph_nodes gn_s ON ge.source = gn_s.id
+                    JOIN graph_nodes gn_t ON ge.target = gn_t.id
+                    WHERE ge.target IN ({ph2})
+                      AND ge.source NOT IN ({ph3})
+                      AND gn_s.type = 'Sector'
+                    ORDER BY gn_s.mention_count DESC""",
+                list(neighbor_ids.keys()) + list(all_direct_ids),
+            ).fetchall()
+
+        results = []
+        seen = set()
+        for r in rows:
+            r = dict(r)
+            if direction == "outbound":
+                sector_id    = r["target"]
+                sector_label = r["tgt_label"]
+                mid_id       = r["source"]
+                mid_label    = r["src_label"]
+            else:
+                sector_id    = r["source"]
+                sector_label = r["src_label"]
+                mid_id       = r["target"]
+                mid_label    = r["tgt_label"]
+
+            if sector_id in seen:
+                continue
+            seen.add(sector_id)
+
+            direct_edge = neighbor_ids.get(mid_id, {})
+            results.append({
+                "sector_label":  sector_label,
+                "mid_label":     mid_label,
+                "mid_relation":  r["relation"],
+                "direct_relation": direct_edge.get("relation", ""),
+                "sentiment":     r["sentiment"],
+                "path":          [keyword, mid_label, sector_label],
+            })
+            if len(results) >= max_results:
+                break
+        return results
+
+    inbound_result  = _fetch_indirect(inbound_neighbors,  "inbound")
+    outbound_result = _fetch_indirect(outbound_neighbors, "outbound")
+
+    conn.close()
+    return {"inbound": inbound_result, "outbound": outbound_result}

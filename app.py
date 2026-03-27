@@ -8,10 +8,43 @@ from datetime import datetime
 import streamlit as st
 import pandas as pd
 
+import os
+from openai import OpenAI
+
 from db import init_db, get_stats, get_graph_stats
 from extractor import fetch_news_by_keywords, auto_fetch_daily_news, run_agent1_extractor
 from analyzer import run_agent2_analyzer
 from graph_builder import build_graph_from_new_articles, render_full_graph_with_highlight
+
+
+def is_valid_finance_keyword(keyword: str) -> bool:
+    """키워드가 증권/투자 리서치와 관련 있는지 LLM으로 판단합니다."""
+    try:
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "당신은 증권사 리서치 서비스의 키워드 필터입니다.\n"
+                        "아래 기준으로 'yes' 또는 'no'만 반환하세요.\n\n"
+                        "yes (허용): 상장기업명, 산업섹터(반도체/철강/바이오 등), "
+                        "금융지표(금리/환율/유가 등), 거시경제 이슈, 규제·정책, "
+                        "투자 관련 사건·이슈\n\n"
+                        "no (차단): 스포츠팀, 연예인, 드라마·영화, 음식, 여행, "
+                        "게임, 정치인 이름(금융 무관), 일반 생활 키워드\n\n"
+                        "반드시 'yes' 또는 'no' 한 단어만 반환."
+                    ),
+                },
+                {"role": "user", "content": keyword},
+            ],
+            temperature=0,
+            max_tokens=5,
+        )
+        return resp.choices[0].message.content.strip().lower().startswith("yes")
+    except Exception:
+        return True  # API 오류 시 통과
 
 # ============================================================================
 # 초기화
@@ -88,6 +121,14 @@ with tab_search:
 
     if analyze_clicked and keyword.strip():
         kw = keyword.strip()
+
+        with st.spinner("키워드 유효성 확인 중..."):
+            valid = is_valid_finance_keyword(kw)
+
+        if not valid:
+            st.error(f"**'{kw}'** 에 대한 해당 정보가 없습니다.\n\n증권·투자와 관련된 기업명, 섹터, 경제 지표 등을 입력해주세요.\n예: 삼성전자, 반도체, 금리, 환율, 이차전지")
+            st.stop()
+
         st.markdown("---")
 
         # ── Step 1: 뉴스 수집 ─────────────────────────────────────────────
@@ -100,7 +141,7 @@ with tab_search:
 
         # ── Step 2: 그래프 업데이트 ───────────────────────────────────────
         with st.status("**Step 2** · 그래프 업데이트 중...", expanded=True) as status:
-            result = build_graph_from_new_articles()
+            result = build_graph_from_new_articles(keyword=kw)
             status.update(
                 label=f"**Step 2** · 노드 +{result['new_nodes']} · 엣지 +{result['new_edges']} 추가됨",
                 state="complete",
@@ -116,62 +157,74 @@ with tab_search:
         else:
             components.html(graph_html, height=600, scrolling=False)
 
-            # ── 영향관계 테이블 ───────────────────────────────────────────
-            ALLOWED_TYPES = {"Company", "Event", "Sector"}
+            # ── 간접 섹터 영향 분석 ──────────────────────────────────────
+            from graph_builder import get_indirect_sector_influences
 
-            RELATION_DESC = {
-                "AFFECTS":      {"positive": "긍정적 영향을 미침",     "negative": "부정적 영향을 미침",   "neutral": "영향을 미침"},
-                "CATALYZES":    {"positive": "성장·확대를 촉진",        "negative": "위축·둔화를 촉진",     "neutral": "변화를 유발"},
-                "IMPACTS":      {"positive": "실적·가치 개선에 기여",   "negative": "실적·가치에 타격",     "neutral": "영향을 줌"},
-                "BENEFITS_FROM":{"positive": "수혜 기대",               "negative": "역풍 우려",            "neutral": "연관됨"},
-                "TRADES":       {"positive": "거래량 확대 기대",        "negative": "거래 위축 우려",       "neutral": "거래 관계"},
-                "SUPPLIES_TO":  {"positive": "공급 확대·수주 기대",     "negative": "공급 축소 우려",       "neutral": "공급 관계"},
-                "PRODUCES":     {"positive": "생산 확대·신제품 출시",   "negative": "생산 차질 우려",       "neutral": "생산 관계"},
-                "COMPETES_WITH":{"positive": "경쟁 우위 확보",          "negative": "경쟁 심화 압박",       "neutral": "경쟁 관계"},
-                "REGULATES":    {"positive": "규제 완화·혜택",          "negative": "규제 강화·제약",       "neutral": "규제 관계"},
-                "INVESTS_IN":   {"positive": "투자 확대·자금 유입",     "negative": "투자 회수 우려",       "neutral": "투자 관계"},
-            }
+            def _llm_explain_influences(kw: str, items: list, direction: str) -> list[str]:
+                """간접 영향 항목들을 한 번의 LLM 호출로 설명 생성"""
+                if not items:
+                    return []
+                client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+                dir_label = f"'{kw}'에 간접적으로 영향을 주는" if direction == "inbound" else f"'{kw}'가 간접적으로 영향을 미치는"
+                items_text = "\n".join([
+                    f"{i+1}. 경로: {' → '.join(inf['path'])}  (관계: {inf['direct_relation']} → {inf['mid_relation']}, 감성: {inf['sentiment']})"
+                    for i, inf in enumerate(items)
+                ])
+                prompt = f"""증권 투자 분석 관점에서 {dir_label} 섹터들의 영향 메커니즘을 설명하세요.
 
-            def describe(relation: str, sentiment: str) -> str:
-                desc = RELATION_DESC.get(relation, {}).get(sentiment)
-                if desc:
-                    return desc
-                # 알 수 없는 relation은 감성으로만
-                return {"positive": "긍정적 연관", "negative": "부정적 연관"}.get(sentiment, "연관 관계")
+{items_text}
 
-            def sentiment_badge(s: str) -> str:
-                return "🟢 긍정" if s == "positive" else "🔴 부정" if s == "negative" else "⚪ 중립"
+각 경로에 대해 2~3문장으로 구체적인 경제·시장 연쇄 메커니즘을 설명하세요.
+JSON 형식으로만 반환: {{"explanations": ["경로1 설명", "경로2 설명"]}}"""
+                try:
+                    resp = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=400,
+                        response_format={"type": "json_object"},
+                    )
+                    import json
+                    data = json.loads(resp.choices[0].message.content)
+                    return data.get("explanations", [])
+                except Exception:
+                    return ["설명을 생성하지 못했습니다."] * len(items)
 
-            def build_rows(items, limit=6):
-                filtered = [n for n in items if n.get("type") in ALLOWED_TYPES]
-                return [
-                    {
-                        "이름": n["label"],
-                        "구분": n["type"],
-                        "영향": sentiment_badge(n["sentiment"]),
-                        "설명": describe(n["relation"], n["sentiment"]),
-                    }
-                    for n in filtered[:limit]
-                ]
+            def _render_influence_cards(items: list, explanations: list, direction: str):
+                badge_map = {"positive": "🟢 긍정", "negative": "🔴 부정", "neutral": "⚪ 중립"}
+                for i, inf in enumerate(items):
+                    badge  = badge_map.get(inf["sentiment"], "⚪")
+                    path_str = " → ".join(inf["path"])
+                    explanation = explanations[i] if i < len(explanations) else ""
+                    st.markdown(
+                        f"""<div style="background:#1e2130;border-radius:10px;padding:14px 16px;margin-bottom:10px;border-left:4px solid {'#10B981' if inf['sentiment']=='positive' else '#EF4444' if inf['sentiment']=='negative' else '#6B7280'}">
+                        <div style="font-size:15px;font-weight:bold;color:#fff;margin-bottom:4px">{badge} &nbsp;{inf['sector_label']}</div>
+                        <div style="font-size:11px;color:#9CA3AF;margin-bottom:8px">경로: {path_str}</div>
+                        <div style="font-size:13px;color:#D1D5DB;line-height:1.6">{explanation}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
 
-            st.subheader("📊 영향 관계 분석")
-            col_in, col_out = st.columns(2)
+            st.subheader("📊 간접 섹터 영향 분석")
+            with st.spinner("간접 영향 경로 분석 중..."):
+                indirect = get_indirect_sector_influences(kw, max_results=3)
+                col_in, col_out = st.columns(2)
 
-            with col_in:
-                st.markdown(f"#### ⬅️ **{kw}** 에 영향을 주는 요소")
-                rows_in = build_rows(neighborhood["inbound"])
-                if rows_in:
-                    st.dataframe(pd.DataFrame(rows_in), use_container_width=True, hide_index=True)
-                else:
-                    st.info("분석된 영향 요소 없음")
+                with col_in:
+                    st.markdown(f"#### ⬅️ **{kw}** 에 간접 영향을 주는 섹터")
+                    if indirect["inbound"]:
+                        expls = _llm_explain_influences(kw, indirect["inbound"], "inbound")
+                        _render_influence_cards(indirect["inbound"], expls, "inbound")
+                    else:
+                        st.info("간접 영향 섹터를 찾지 못했습니다.")
 
-            with col_out:
-                st.markdown(f"#### ➡️ **{kw}** 이 영향을 주는 요소")
-                rows_out = build_rows(neighborhood["outbound"])
-                if rows_out:
-                    st.dataframe(pd.DataFrame(rows_out), use_container_width=True, hide_index=True)
-                else:
-                    st.info("분석된 영향 요소 없음")
+                with col_out:
+                    st.markdown(f"#### ➡️ **{kw}** 이 간접 영향을 주는 섹터")
+                    if indirect["outbound"]:
+                        expls = _llm_explain_influences(kw, indirect["outbound"], "outbound")
+                        _render_influence_cards(indirect["outbound"], expls, "outbound")
+                    else:
+                        st.info("간접 영향 섹터를 찾지 못했습니다.")
 
         # ── 수집된 뉴스 목록 ──────────────────────────────────────────────
         if articles:
@@ -206,7 +259,7 @@ with tab_full:
         st.subheader("🔥 핵심 노드 Top 10")
         top_df = pd.DataFrame(g_stats_now["top_nodes"])
         if not top_df.empty:
-            top_df.columns = ["노드명", "타입", "언급 수"]
+            top_df.columns = ["노드명", "타입", "언급 수", "감성점수"]
             st.dataframe(top_df, use_container_width=True, hide_index=True)
 
 # ============================================================================

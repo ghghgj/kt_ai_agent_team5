@@ -16,22 +16,37 @@ init_db()
 # 뉴스 수집 (DDGS 실제 구현)
 # ============================================================================
 
+def _deduplicate(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """제목 유사도 기반 중복 제거 (Jaccard similarity > 0.5 이면 중복으로 판단)"""
+    def tokenize(text: str) -> set:
+        return set(text.lower().replace("[", "").replace("]", "").split())
+
+    kept = []
+    for a in articles:
+        tokens_a = tokenize(a.get("title", ""))
+        is_dup = any(
+            len(tokens_a & tokenize(k.get("title", ""))) / max(len(tokens_a | tokenize(k.get("title", ""))), 1) > 0.5
+            for k in kept
+        )
+        if not is_dup:
+            kept.append(a)
+    return kept
+
+
 def fetch_news_by_keywords(
     keywords: List[str],
-    max_per_keyword: int = 5,
-    user_tag: str = "anonymous",
+    max_per_keyword: int = 30,
 ) -> List[Dict[str, Any]]:
     """
     키워드 리스트로 DuckDuckGo News에서 최신 뉴스를 수집하고 DB에 저장합니다.
+    30건 수집 후 제목 유사도 기반 중복을 제거한 결과를 저장합니다.
 
     Args:
         keywords: 검색 키워드 리스트 (예: ["삼성전자", "AI 반도체"])
-        max_per_keyword: 키워드당 최대 수집 기사 수
-        user_tag: 요청 사용자 식별자 (검색 로그용)
+        max_per_keyword: 키워드당 최대 수집 수 (기본 30)
 
     Returns:
-        List[Dict]: 수집된 기사 리스트
-            각 항목: {keyword, title, body, url, source, date}
+        List[Dict]: 중복 제거 후 저장된 기사 리스트
     """
     from duckduckgo_search import DDGS
 
@@ -63,10 +78,11 @@ def fetch_news_by_keywords(
                 for r in results
             ]
 
-            saved = save_articles(keyword, articles, user_tag=user_tag)
-            print(f"[DB] '{keyword}': {len(articles)}건 수집, {saved}건 신규 저장")
+            deduped = _deduplicate(articles)
+            saved = save_articles(keyword, deduped)
+            print(f"[DB] '{keyword}': {len(articles)}건 수집 → {len(deduped)}건 중복제거 → {saved}건 신규 저장")
 
-            all_articles.extend(articles)
+            all_articles.extend(deduped)
             time.sleep(0.5)  # DDGS 요청 간격
 
     return all_articles
@@ -74,7 +90,6 @@ def fetch_news_by_keywords(
 
 def auto_fetch_daily_news(
     keywords: List[str] | None = None,
-    user_tag: str = "anonymous",
 ) -> str:
     """
     키워드 기반으로 최신 뉴스를 수집하여 하나의 텍스트 문자열로 반환합니다.
@@ -82,13 +97,12 @@ def auto_fetch_daily_news(
 
     Args:
         keywords: 검색 키워드 리스트. None이면 DB에서 기존 기사 반환.
-        user_tag: 요청 사용자 식별자
 
     Returns:
         str: 수집된 뉴스 원문 텍스트 전체
     """
     if keywords:
-        articles = fetch_news_by_keywords(keywords, user_tag=user_tag)
+        articles = fetch_news_by_keywords(keywords)
     else:
         # 키워드 없으면 DB 전체 최신 기사 활용
         from db import get_all_articles
