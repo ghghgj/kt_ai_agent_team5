@@ -1,4 +1,5 @@
 streamlit
+pyvis
 langchain
 langchain-community
 langchain-openai
