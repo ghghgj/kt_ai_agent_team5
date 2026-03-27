@@ -8,5 +8,5 @@ EMB_MODEL_NAME=text-embedding-3-small
 # LangSmith
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_API_KEY=
+LANGCHAIN_API_KEY=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
 LANGCHAIN_PROJECT=kt-agent
