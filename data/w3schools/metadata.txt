@@ -1,0 +1,106 @@
+[DB 설명]: 상품 판매와 운송을 위한 고객, 상품, 판매, 운송, 공급사 등의 다양한 데이터가 기록된 DB
+[전체 Table]: -Customers, Categories, Suppliers, Employees, Shippers, Products, Orders, OrderDetails
+
+TABLE: Customers
+설명: 고객(회사) 기본 정보 테이블. 주문의 주체가 되는 고객 레코드를 보관.
+컬럼:
+- CustomerID (INTEGER, PK): 고객 고유 식별자
+- CustomerName (TEXT): 고객명(회사명)
+- ContactName (TEXT): 담당자 이름
+- Address (TEXT): 주소
+- City (TEXT): 도시
+- PostalCode (TEXT): 우편번호
+- Country (TEXT): 국가
+관계:
+- Orders.CustomerID -> Customers.CustomerID (1:N, 고객별 여러 주문) 
+
+================================================================
+TABLE: Categories
+설명: 제품 분류 테이블. 제품의 상위 카테고리 메타.
+컬럼:
+- CategoryID (INTEGER, PK): 카테고리 고유 식별자
+- CategoryName (TEXT): 카테고리명
+- Description (TEXT): 카테고리 설명
+관계:
+- Products.CategoryID -> Categories.CategoryID (1:N, 한 카테고리에 여러 제품)
+
+================================================================
+TABLE: Suppliers
+설명: 공급사(제품 공급 업체) 기본 정보.
+컬럼:
+- SupplierID (INTEGER, PK): 공급사 고유 식별자
+- SupplierName (TEXT): 공급사명
+- ContactName (TEXT): 담당자 이름
+- Address (TEXT): 주소
+- City (TEXT): 도시
+- PostalCode (TEXT): 우편번호
+- Country (TEXT): 국가
+- Phone (TEXT): 전화번호
+관계:
+- Products.SupplierID -> Suppliers.SupplierID (1:N, 한 공급사에서 여러 제품 공급)
+
+================================================================
+TABLE: Employees
+설명: 사원(직원) 기본 정보. 주문을 처리한 직원 정보.
+컬럼:
+- EmployeeID (INTEGER, PK): 직원 고유 식별자
+- LastName (TEXT): 성
+- FirstName (TEXT): 이름
+- BirthDate (DATE): 생년월일
+- Photo (TEXT): 사진 파일명(샘플 문자열)
+- Notes (TEXT): 비고/메모
+관계:
+- Orders.EmployeeID -> Employees.EmployeeID (1:N, 한 직원이 여러 주문 담당)
+
+================================================================
+TABLE: Shippers
+설명: 배송사(택배사) 정보.
+컬럼:
+- ShipperID (INTEGER, PK): 배송사 고유 식별자
+- ShipperName (TEXT): 배송사명
+- Phone (TEXT): 연락처
+관계:
+- Orders.ShipperID -> Shippers.ShipperID (1:N, 한 배송사로 여러 주문 배송)
+
+================================================================
+TABLE: Products
+설명: 판매 제품 기본 정보.
+컬럼:
+- ProductID (INTEGER, PK): 제품 고유 식별자
+- ProductName (TEXT): 제품명
+- SupplierID (INTEGER, FK -> Suppliers.SupplierID): 공급사 참조
+- CategoryID (INTEGER, FK -> Categories.CategoryID): 카테고리 참조
+- Unit (TEXT): 포장/단위 설명(예: "10 boxes x 20 bags")
+- Price (DECIMAL): 단가
+관계:
+- Products.SupplierID -> Suppliers.SupplierID (N:1)
+- Products.CategoryID -> Categories.CategoryID (N:1)
+- OrderDetails.ProductID -> Products.ProductID (1:N, 제품별 여러 주문 상세)
+
+================================================================
+TABLE: Orders
+설명: 주문 헤더(상단) 정보. 고객이 특정 날짜에 생성한 주문의 기본 속성.
+컬럼:
+- OrderID (INTEGER, PK): 주문 고유 식별자
+- CustomerID (INTEGER, FK -> Customers.CustomerID): 주문 고객
+- EmployeeID (INTEGER, FK -> Employees.EmployeeID): 담당 직원
+- OrderDate (DATE): 주문 일자
+- ShipperID (INTEGER, FK -> Shippers.ShipperID): 배송사
+관계:
+- Orders.CustomerID -> Customers.CustomerID (N:1)
+- Orders.EmployeeID -> Employees.EmployeeID (N:1)
+- Orders.ShipperID -> Shippers.ShipperID (N:1)
+- OrderDetails.OrderID -> Orders.OrderID (1:N, 한 주문에 여러 상세라인)
+
+================================================================
+TABLE: OrderDetails
+설명: 주문 상세(라인아이템) 정보. 주문에 포함된 개별 제품과 수량 기록.
+컬럼:
+- OrderDetailID (INTEGER, PK): 주문 상세 고유 식별자
+- OrderID (INTEGER, FK -> Orders.OrderID): 상위 주문 참조
+- ProductID (INTEGER, FK -> Products.ProductID): 주문한 제품
+- Quantity (INTEGER): 주문 수량
+관계:
+- OrderDetails.OrderID -> Orders.OrderID (N:1)
+- OrderDetails.ProductID -> Products.ProductID (N:1)
+

@@ -1,0 +1,17 @@
+**Table:** passengers  
+**Description:** Titanic passenger manifest
+
+**columns:**PassengerId,Survived,Pclass,Name,Sex,Age,SibSp,Parch,Ticket,Fare,Cabin,Embarked
+**columns explain:**
+- PassengerId: 각 승객을 구분하는 고유 식별자(ID) <int>
+- Survived: 생존 여부 (0 = 사망, 1 = 생존) <bool>
+- Pclass: 선실 등급 (1등석, 2등석, 3등석) <int>
+- Name: 승객 이름 (호칭 포함, 예: Mr, Mrs, Miss 등) <str>
+- Sex: 성별 (male / female) <str>
+- Age: 나이 (정수 또는 소수, 일부 결측치 있음) <int>
+- SibSp: 함께 탑승한 형제/자매 또는 배우자의 수 (sibling/spouse) <int>
+- Parch: 함께 탑승한 부모/자녀의 수 (parent/children) <int>
+- Ticket: 탑승권 번호 (문자/숫자 혼합) <Any>
+- Fare: 운임 요금 (float, 단위: 파운드) <float>
+- Cabin: 객실 번호 (문자열, 일부 결측치 많음) <Any>
+- Embarked: 승선 항구 (C = Cherbourg, Q = Queenstown, S = Southampton) <char>

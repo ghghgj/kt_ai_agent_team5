@@ -1,0 +1,43 @@
+name: rag-agent-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - nodejs=20  # MCP 서버 실행 및 클로드 코드 연동을 위해 필요
+  - graphviz   # 랭그래프 시각화 엔진
+  - pip:
+      # 1. 핵심 프레임워크
+      - langchain
+      - langchain-community
+      - langchain-openai
+      - langchain-text-splitters
+      - langchain-experimental      # LLMGraphTransformer (telecom_graph_rag)
+      - langgraph
+      - langchain-mcp-adapters      # MCP 도구를 랭체인에서 쓰기 위한 어댑터
+      - openai
+
+      # 2. RAG & 벡터 데이터베이스
+      - faiss-cpu                   # 로컬 벡터 DB
+
+      # 3. Graph RAG
+      - langchain-graph-retriever   # graph_rag_test.py
+      - graph-retriever
+      - graph-rag-example-helpers
+      - networkx                    # 지식 그래프 (telecom_graph_rag)
+
+      # 4. 문서 파싱 및 전처리
+      - pymupdf                     # PDF 읽기
+      - wikipedia                   # WikipediaLoader 의존성
+
+      # 5. 에이전트 도구
+      - duckduckgo-search           # 웹 검색
+      - pandas                      # 데이터 분석
+      - tqdm                        # 진행 표시
+
+      # 6. UI
+      - gradio                      # 웹 데모
+
+      # 7. 유틸리티
+      - python-dotenv               # API 키 관리
